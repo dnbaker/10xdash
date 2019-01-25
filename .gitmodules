@@ -1,0 +1,12 @@
+[submodule "bonsai"]
+	path = bonsai
+	url = https://github.com/dnbaker/bonsai
+[submodule "htslib"]
+	path = htslib
+	url = https://github.com/samtools/htslib
+[submodule "distmat"]
+	path = distmat
+	url = https://github.com/dnbaker/distmat
+[submodule "flat_hash_map"]
+	path = flat_hash_map
+	url = https://github.com/skarupke/flat_hash_map
