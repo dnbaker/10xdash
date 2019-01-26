@@ -10,6 +10,15 @@
 #include "htslib/htslib/sam.h"
 #include "klib/ketopt.h"
 #include "flat_hash_map/flat_hash_map.hpp"
+#include <new>
+#include <omp.h>
+#if __cplusplus >= 201703L
+#  include <memory>
+#  if __has_include(<execution>)
+#    define USE_PAR_EX
+#    include <execution>
+#  endif
+#endif
 using namespace sketch;
 using namespace bns;
 
@@ -42,90 +51,190 @@ static const int8_t lut [] {
     -1, 0, 1, -1, 2, -1, -1, -1, 3, -1, -1, -1, -1, -1, -1, -1
 };
 
-int bam_main(int argc, char *argv[]) {
-    if(argc == 1) return bam_usage();
-    bam1_t *b = bam_init1();
-    const char *path = argv[1];
-    samFile *fp = sam_open(path, "r");
-    auto hdr = sam_hdr_read(fp);
-    ketopt_t opt = KETOPT_INIT;
-    int rc, nthreads = 1;
-    int p = 8, full_p = 0, k = 31;
+enum Sketch {
+    HLL = 0,
+    BLOOM_FILTER = 1,
+    RANGE_MIN_HASH = 2,
+    HYPER_MIN_HASH = 3 // Not yet supported
+};
+
+struct CLIArgs {
+    int nthreads = 1;
+    int sketch_size_l2 = 8;
+    int full_sketch_size_l2_diff = 0; // Defaults to sketch_size_l2
+    int k = 31;
+    int compression_level = 0;
     bool skip_full = false;
+    bool write_sketches_only = false;
+    bool write_human_readable = true;
     size_t map_reserve_size = 1 << 16;
-    BCType tagtype = CB;
-    while((rc = ketopt(&opt, argc, argv, 0, "k:R:p:brh?", nullptr)) >= 0) {
-        switch(rc) {
-           case 'p': nthreads = std::atoi(optarg); assert(nthreads > 0); break;
-           case 'b': tagtype = UB; break;
-           case 'r': tagtype = UR; break;
-           case 'S': p = std::atoi(optarg); break;
-           case 'k': k = std::atoi(optarg); break;
-           case 'f': full_p = std::atoi(optarg); break;
-           case 'P': skip_full = true; break;
-           case 'R': map_reserve_size = std::strtoull(optarg, nullptr, 10); break;
-           case 'h': return bam_usage();
+    samFile *fp = nullptr;
+    bam_hdr_t *hdr = nullptr;
+    BCType tag = CB;
+    Sketch sketch_type = HLL;
+    size_t parallel_chunk_size = 1 << 10;
+    const char *omatpath = nullptr;
+    static size_t bytesl2_to_arg(int nblog2, Sketch sketch) {
+        switch(sketch) {
+            case HLL: return nblog2;
+            case BLOOM_FILTER: return nblog2 + 3; // 8 bits per byte
+            case HYPER_MIN_HASH: return nblog2 - 1; // Assuming 16-bit HMH
+            case RANGE_MIN_HASH: return size_t(1) << nblog2;
+            default: RUNTIME_ERROR("Impocerous!"); return -1337;
         }
+        
     }
-    if(!full_p) full_p = p;
-    const char *const tag = tags[tagtype];
-    ska::flat_hash_map<u32, hll::hll_t> map;
-    map.reserve(map_reserve_size); // why not?
-    // ma
-    void *data;
-    hll::hll_t *full_set = skip_full ? nullptr: new hll::hll_t(full_p);
+    int next_rec(bam1_t *b) {
+        return sam_read1(fp, hdr, b);
+    }
+};
+
+template<typename SketchType, typename... Args>
+int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, Args &&... sketchargs) {
+    const char *const tag = tags[args.tag];
+    bam1_t *b = bam_init1();
+    ska::flat_hash_map<u32, SketchType> map;
+    map.reserve(args.map_reserve_size); // why not?
     sketch::common::WangHash hasher;
-    const uint64_t kmer_mask = UINT64_C(-1) >> (64 - (k * 2));
-    while((rc = sam_read1(fp, hdr, b)) >= 0) {
+    const uint64_t kmer_mask = UINT64_C(-1) >> (64 - (args.k * 2));
+    SketchType *full_set = 
+        args.skip_full ? nullptr
+                       : new SketchType(args.bytesl2_to_arg(
+                                            args.sketch_size_l2 +
+                                                args.full_sketch_size_l2_diff, args.sketch_type),
+                                        std::forward<Args>(sketchargs)...);
+    int rc;
+    while((rc = args.next_rec(b)) >= 0) {
         if(b->core.flag & (BAM_FUNMAP | BAM_FSECONDARY)) continue;
         uint8_t *data = bam_aux_get(b, tag);
-        if(unlikely(data == nullptr)) throw std::runtime_error(std::string("Missing ") + tag + " tag");
+        if(unlikely(data == nullptr)) RUNTIME_ERROR(std::string("Missing ") + tag + " tag");
         data = reinterpret_cast<uint8_t *>(bam_aux2Z(data));
         u32 bcbin = encode_bc(reinterpret_cast<char *>(data));
         auto it = map.find(bcbin);
-        if(it == map.end()) it = map.emplace(bcbin, hll::hll_t(p)).first;
+        if(it == map.end()) it = map.emplace(bcbin, SketchType(args.bytesl2_to_arg(args.sketch_size_l2, args.sketch_type), std::forward<Args>(sketchargs)...)).first;
         data = bam_get_seq(b);
         int i = 0, len = b->core.l_qseq, nfilled;
         u64 kmer = lut[bam_seqi(data, 0)];
         if(kmer == BF)
-            i += k, kmer = 0, nfilled = 0;
+            kmer = 0, nfilled = 0; // Skip 'k', as 
         else nfilled = 1;
         while(i < len) {
             kmer <<= 2;
             if((kmer |= lut[bam_seqi(data, i)]) == BF)
-                kmer = 0, i += k;
+                kmer = nfilled = 0;
             else {
                 kmer &= kmer_mask;
-                if(++nfilled == k) {
-                    uint64_t hv = hasher(kmer);
-                    it->second.add(hv);
-                    if(full_set) full_set->add(hv);
+                if(++nfilled == args.k) {
+                    it->second.addh(kmer);
+                    if(full_set) full_set->addh(kmer);
                     --nfilled;
                 }
             }
+            ++i;
         }
     }
+    bam_destroy1(b);
+    std::string opath;
+    if(full_set) {
+        opath = args.fp->fn;
+        opath += ".hll";
+        full_set->write(opath.data());
+    }
+    if(args.write_sketches_only) {
+        for(const auto &pair: map) {
+            opath = pair.first;
+            opath += ".hll";
+            pair.second.write(opath.data());
+        }
+        return EXIT_SUCCESS;
+    }
     const size_t map_size = map.size();
-    hll::hll_t *ptrs = static_cast<hll::hll_t *>(std::malloc(sizeof(hll::hll_t) * map_size));
+    SketchType *ptrs = static_cast<SketchType *>(std::malloc(sizeof(SketchType) * map_size));
     if(ptrs == nullptr) throw std::bad_alloc();
     auto pp = ptrs;
     for(auto &&pair: map) {
-        new(pp++) hll::hll_t(std::move(pair.second));
+        new(pp++) SketchType(std::move(pair.second));
+    }
+    distmat->resize(map_size);
+    omp_set_num_threads(args.nthreads);
+    if(map_size < args.parallel_chunk_size) {
+        for(size_t i = 0; i < map_size; ++i) {
+            auto &cmpsketch = ptrs[i];
+            auto span = distmat->row_span(i);
+            #pragma omp parallel for
+            for(size_t j = i + 1; j < map_size; ++j) {
+                assert(j >= i - 1 && (j - i - 1 <= span.second));
+                span.first[j - i - 1] = jaccard_index(cmpsketch, ptrs[j]);
+            }
+        }
     }
     // Core distance code
-    std::for_each(ptrs, ptrs + map_size, [](auto &h) {h.~hllbase_t();});
+#if __cplusplus >= 201703L
+    std::destroy_n(
+#ifdef USE_PAR_EX
+        std::execution::par,
+#endif
+        ptrs, map_size);
+#else
+    std::for_each(ptrs, pp, [](auto &sketch) {sketch.~SketchType();});
+#endif
     std::free(ptrs);
-    if(rc != EOF) std::fprintf(stderr, "Wrong error code from rc: %d\n", rc);
-    bam_hdr_destroy(hdr);
-    bam_destroy1(b);
+    if(rc != EOF) std::fprintf(stderr, "Warning: Wrong error code from rc: %d\n", rc);
     delete full_set;
+    return rc;
+}
+
+
+int bam_main(int argc, char *argv[]) {
+    if(argc == 1) return bam_usage();
+    CLIArgs args;
+    const char *path = argv[1];
+    ketopt_t opt = KETOPT_INIT;
+    int rc;
+    while((rc = ketopt(&opt, argc, argv, 0, "o:k:R:p:dBbrh?", nullptr)) >= 0) {
+        switch(rc) {
+            case 'B': args.sketch_type = BLOOM_FILTER; break;
+            case 'p': args.nthreads = std::atoi(opt.arg); assert(args.nthreads > 0); break;
+            case 'b': args.tag = UB; break;
+            case 'd': args.write_human_readable = false;
+            case 'r': args.tag = UR; break;
+            case 'S': args.sketch_size_l2 = std::atoi(opt.arg); break;
+            case 'k': args.k = std::atoi(opt.arg); break;
+            case 'f': args.full_sketch_size_l2_diff = std::atoi(opt.arg); break;
+            case 'P': args.skip_full = true; break;
+            case 'w': args.write_sketches_only = true; break;
+            case 'R': args.map_reserve_size = std::strtoull(opt.arg, nullptr, 10); break;
+            case 'o': args.omatpath = optarg; break;
+            case 'z': args.compression_level = 6; break;
+            case 'h': return bam_usage();
+        }
+    }
+    samFile *fp = sam_open(path, "r");
+    if(!fp) RUNTIME_ERROR(std::string("Could not open sam at ") + path);
+    auto hdr = sam_hdr_read(fp);
+    if(!hdr) RUNTIME_ERROR(std::string("Could not parse header from file at ") + path);
+    dm::DistanceMatrix<float> distances;
+    switch(args.sketch_type) {
+        case HLL: core<hll::hll_t>(args, &distances); break;
+        case BLOOM_FILTER: core<bf::bf_t>(args, &distances); break;
+        default: throw std::runtime_error(std::string("NotImplemented sketch type ") + std::to_string(args.sketch_type));
+    }
+    if(distances.size()) {
+        std::string opath = args.omatpath ? args.omatpath: (std::string(path) + ".distmat").data();
+        gzFile ofp = gzopen(opath.data(), (std::string("wb") + std::to_string(args.compression_level)).data());
+        if(!ofp) RUNTIME_ERROR(std::string("Could not open file for writing at ") + opath.data());
+        if(args.write_human_readable)
+            distances.printf(ofp, true); // Always emit scientific fmt for now
+        else
+            distances.write(ofp);
+        gzclose(ofp);
+    }
+    bam_hdr_destroy(hdr);
+    sam_close(fp);
     return EXIT_SUCCESS;
 }
 
 int main(int argc, char *argv[]) {
     ex = argv[0];
     return bam_main(argc, argv);
-    if(std::strcmp(argv[1], "bam") == 0)
-        return bam_main(argc - 1, argv + 1);
-    RUNTIME_ERROR("Unsupported command");
 }

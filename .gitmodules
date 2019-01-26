@@ -7,6 +7,7 @@
 [submodule "distmat"]
 	path = distmat
 	url = https://github.com/dnbaker/distmat
+    branch = gz
 [submodule "flat_hash_map"]
 	path = flat_hash_map
 	url = https://github.com/skarupke/flat_hash_map
