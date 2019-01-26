@@ -9,6 +9,7 @@
 #include "flat_hash_map/flat_hash_map.hpp"
 #include <new>
 #include <omp.h>
+#include "khset/khset.h"
 #if __cplusplus >= 201703L
 #  include <memory>
 #  if __has_include(<execution>)
@@ -59,6 +60,23 @@ enum Sketch {
     FULL_KHASH_SET = 4 // Not yet supported
 };
 
+struct khset64_t: public kh::khset64_t {
+    void addh(uint64_t v) {this->insert(v);}
+    khset64_t(): kh::khset64_t() {}
+    khset64_t(size_t reservesz): kh::khset64_t(reservesz) {}
+};
+
+double jaccard_index(const khset64_t &a, const khset64_t &b) {
+    auto p1 = &a, p2 = &b;
+    if(a.size() > b.size())
+        std::swap(p1, p2);
+    size_t olap = 0;
+    p1->for_each([&](auto v) {
+        olap += p2->contains(v);
+    });
+    return static_cast<double>(olap) / (p1->size() + p2->size() - olap);
+}
+
 struct CLIArgs {
     int nthreads = 1;
     int sketch_size_l2 = 8;
@@ -81,6 +99,7 @@ struct CLIArgs {
             case BLOOM_FILTER: return nblog2 + 3; // 8 bits per byte
             case HYPER_MIN_HASH: return nblog2 - 1; // Assuming 16-bit HMH
             case RANGE_MIN_HASH: return size_t(1) << nblog2;
+            case FULL_KHASH_SET: return size_t(1) << nblog2; // No real reason
             default: RUNTIME_ERROR("Impocerous!"); return -1337;
         }
         
@@ -188,7 +207,6 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     return rc;
 }
 
-
 int bam_main(int argc, char *argv[]) {
     if(argc == 1) return bam_usage();
     CLIArgs args;
@@ -222,6 +240,7 @@ int bam_main(int argc, char *argv[]) {
     switch(args.sketch_type) {
         case HLL: core<hll::hll_t>(args, &distances, &bcs); break;
         case BLOOM_FILTER: core<bf::bf_t>(args, &distances, &bcs); break;
+        case FULL_KHASH_SET: core<khset64_t>(args, &distances, &bcs); break;
         default: throw std::runtime_error(std::string("NotImplemented sketch type ") + std::to_string(args.sketch_type));
     }
     if(distances.size()) {
