@@ -90,7 +90,7 @@ struct CLIArgs {
 };
 
 template<typename SketchType, typename... Args>
-int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, Args &&... sketchargs) {
+int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args &&... sketchargs) {
     const char *const tag = tags[args.tag];
     bam1_t *b = bam_init1();
     ska::flat_hash_map<u32, SketchType> map;
@@ -151,8 +151,11 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, Args &&... sketcharg
     const size_t map_size = map.size();
     SketchType *ptrs = static_cast<SketchType *>(std::malloc(sizeof(SketchType) * map_size));
     if(ptrs == nullptr) throw std::bad_alloc();
+    uint32_t *barcodes = static_cast<uint32_t *>(std::malloc(sizeof(uint32_t) * map_size)), *bcp = barcodes;
+    *bcs = barcodes;
     auto pp = ptrs;
     for(auto &&pair: map) {
+        *bcp++ = pair.first;
         new(pp++) SketchType(std::move(pair.second));
     }
     distmat->resize(map_size);
@@ -214,19 +217,30 @@ int bam_main(int argc, char *argv[]) {
     auto hdr = sam_hdr_read(fp);
     if(!hdr) RUNTIME_ERROR(std::string("Could not parse header from file at ") + path);
     dm::DistanceMatrix<float> distances;
+    uint32_t *bcs = nullptr;
     switch(args.sketch_type) {
-        case HLL: core<hll::hll_t>(args, &distances); break;
-        case BLOOM_FILTER: core<bf::bf_t>(args, &distances); break;
+        case HLL: core<hll::hll_t>(args, &distances, &bcs); break;
+        case BLOOM_FILTER: core<bf::bf_t>(args, &distances, &bcs); break;
         default: throw std::runtime_error(std::string("NotImplemented sketch type ") + std::to_string(args.sketch_type));
     }
     if(distances.size()) {
         std::string opath = args.omatpath ? args.omatpath: (std::string(path) + ".distmat").data();
         gzFile ofp = gzopen(opath.data(), (std::string("wb") + std::to_string(args.compression_level)).data());
         if(!ofp) RUNTIME_ERROR(std::string("Could not open file for writing at ") + opath.data());
-        if(args.write_human_readable)
+        if(args.write_human_readable) {
+            gzputs(ofp, "#Labels");
+            std::for_each(bcs, bcs + distances.size(), [ofp](auto bc) {gzprintf(ofp, "\t%u", bc);});
+            gzputc(ofp, '\n');
             distances.printf(ofp, true); // Always emit scientific fmt for now
-        else
+        }
+        else {
+            std::FILE *cfp = std::fopen((opath + ".labels").data(), "w");
+            if(!cfp) RUNTIME_ERROR(std::string("Could not open file at ") + opath + ".labels");
+            std::fprintf(cfp, "#Barcodes\n");
+            std::for_each(bcs, bcs + distances.size(), [cfp](auto bc) {std::fprintf(cfp, "%u\n", bc);});
             distances.write(ofp);
+            std::fclose(cfp);
+        }
         gzclose(ofp);
     }
     bam_hdr_destroy(hdr);
