@@ -1,12 +1,9 @@
 #include "bonsai/bonsai/include/util.h"
-#include "bonsai/bonsai/include/database.h"
 #include "bonsai/bonsai/include/bitmap.h"
 #include "bonsai/bonsai/include/setcmp.h"
 #include "bonsai/hll/hll.h"
 #include "bonsai/hll/ccm.h"
-#include "bonsai/pdqsort/pdqsort.h"
 #include "distmat/distmat.h"
-#include <sstream>
 #include "htslib/htslib/sam.h"
 #include "klib/ketopt.h"
 #include "flat_hash_map/flat_hash_map.hpp"
@@ -49,13 +46,17 @@ int bam_usage() {
 
 static const int8_t lut [] {
     -1, 0, 1, -1, 2, -1, -1, -1, 3, -1, -1, -1, -1, -1, -1, -1
+    // For 4-bit nucleotides
+    // We ignore anything that isn't A, C, G, or T
+    // the |= -1 converts the kmer to UINT64_C(-1), which we reserve as an error code.
 };
 
 enum Sketch {
     HLL = 0,
     BLOOM_FILTER = 1,
     RANGE_MIN_HASH = 2,
-    HYPER_MIN_HASH = 3 // Not yet supported
+    HYPER_MIN_HASH = 3,
+    FULL_KHASH_SET = 4 // Not yet supported
 };
 
 struct CLIArgs {
