@@ -48,6 +48,7 @@ int bam_usage() {
                          "-B\tUse Bloom Filters for sketches. These become more accurate with very large sketches. Default: HLL\n"
                          "-K\tUse full hash sets instead of sketches. These are exact, but expensive to compare and require a relatively larger amount of memory. Default: HLL\n"
                          "-M\tUse bottom-k minhash. Default: HLL\n"
+                         "-M\tUse counting bottom-k minhash histogram intersection. Default: HLL\n"
                          "-S\tSketch size in bytes, log2. Default: 8 (256 bytes per sketch)\n"
                          "-k\tKmer length. Default: 31\n"
                          "-f\tFail all reads without all bits in argument set. This can be specified multiple times. Default: 0\n"
@@ -263,9 +264,10 @@ int bam_main(int argc, char *argv[]) {
     CLIArgs args;
     ketopt_t opt = KETOPT_INIT;
     int rc;
-    while((rc = ketopt(&opt, argc, argv, 0, "s:o:k:R:p:S:z:f:F:PKdwdBbrh?", nullptr)) >= 0) {
+    while((rc = ketopt(&opt, argc, argv, 0, "s:o:k:R:p:S:z:f:F:PKCdwdBbrh?", nullptr)) >= 0) {
         switch(rc) {
             case 'B': args.sketch_type = BLOOM_FILTER; break;
+            case 'C': args.sketch_type = COUNTING_RANGE_MINHASH; break;
             case 'K': args.sketch_type = FULL_KHASH_SET; break;
             case 'P': args.skip_full = true; break;
             case 'R': args.map_reserve_size = std::strtoull(opt.arg, nullptr, 10); break;
