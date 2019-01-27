@@ -9,6 +9,7 @@
 #include "klib/ketopt.h"
 #include "flat_hash_map/flat_hash_map.hpp"
 #include <new>
+#include <list>
 #include <omp.h>
 #include "khset/khset.h"
 #if __cplusplus >= 201703L
@@ -77,8 +78,8 @@ enum Sketch {
     BLOOM_FILTER = 1,
     RANGE_MINHASH = 2,
     FULL_KHASH_SET = 3,
-    HYPERMINHASH = 4, // Not yet supported
-    COUNTING_RANGE_MINHASH = 5 // Not yet supported
+    COUNTING_RANGE_MINHASH = 4,
+    HYPERMINHASH = 5, // Not yet supported
 };
 
 template<typename T>
@@ -153,6 +154,14 @@ template<> struct FinalSketch<mh::RangeMinHash<uint64_t>> {
 template<> struct FinalSketch<mh::CountingRangeMinHash<uint64_t>> {
     using final_type = typename mh::CountingRangeMinHash<uint64_t>::final_type;
 };
+template<typename T>struct SketchFileSuffux {static constexpr const char *suffix = ".sketch";};
+#define SSS(type, suf) template<> struct SketchFileSuffux<type> {static constexpr const char *suffix = suf;}
+SSS(mh::CountingRangeMinHash<uint64_t>, ".crmh");
+SSS(mh::RangeMinHash<uint64_t>, ".rmh");
+SSS(khset64_t, ".khs");
+SSS(bf::bf_t, ".bf");
+SSS(mh::HyperMinHash<uint64_t>, ".hmh");
+SSS(hll::hll_t, ".hll");
 
 template<typename SketchType, typename... Args>
 int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args &&... sketchargs) {
@@ -203,17 +212,28 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
         }
     }
     bam_destroy1(b);
-    std::string opath;
+    std::future<void> full_writer;
     if(full_set) {
-        opath = args.fp->fn;
-        opath += ".hll";
-        full_set->write(opath.data());
+        std::string opath = args.fp->fn;
+        opath += SketchFileSuffux<SketchType>::suffix;
+        full_writer = std::async(std::launch::async, [&]() {
+            full_set->write(opath.data());
+        });
     }
     if(args.write_sketches_only) {
+        std::list<std::future<void>> q;
         for(const auto &pair: map) {
-            opath = pair.first;
-            opath += ".hll";
-            pair.second.write(opath.data());
+            q.emplace_back(std::async(std::launch::async, [&]() {
+                std::string opath = std::to_string(pair.first) + SketchFileSuffux<SketchType>::suffix;
+                pair.second.write(opath.data());
+            }));
+            while(q.size() >= args.nthreads) {
+                auto it = std::find_if(q.begin(), q.end(), [&](auto &future) {
+                    return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+                });
+                if(it != q.end()) q.erase(it);
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
         }
         return EXIT_SUCCESS;
     }
