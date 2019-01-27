@@ -137,7 +137,7 @@ struct CLIArgs {
             case COUNTING_RANGE_MINHASH: return size_t(1) << (nblog2) / (sizeof(uint64_t) + sizeof(uint32_t));
             default: RUNTIME_ERROR("Impocerous!"); return -1337;
         }
-        
+
     }
     int next_rec(bam1_t *b) {
         return sam_read1(fp, hdr, b);
@@ -171,12 +171,12 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     map.reserve(args.map_reserve_size); // why not?
     sketch::common::WangHash hasher;
     const uint64_t kmer_mask = UINT64_C(-1) >> (64 - (args.k * 2));
-    SketchType *full_set = 
+    std::unique_ptr<SketchType> full_set =
         args.skip_full ? nullptr
-                       : new SketchType(args.bytesl2_to_arg(
+                       : std::make_unique<SketchType>(args.bytesl2_to_arg(
                                             args.sketch_size_l2 +
                                                 args.full_sketch_size_l2_diff, args.sketch_type),
-                                        std::forward<Args>(sketchargs)...);
+                                          std::forward<Args>(sketchargs)...);
     int rc;
     while((rc = args.next_rec(b)) >= 0) {
         if(b->core.flag & (args.fail_flags) || (b->core.flag & args.required_flags) != args.required_flags) continue;
@@ -194,19 +194,17 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
         int i = 0, len = b->core.l_qseq, nfilled;
         u64 kmer = lut4b[bam_seqi(data, 0)];
         if(kmer == BF)
-            kmer = 0, nfilled = 0; // Skip 'k', as 
+            kmer = 0, nfilled = 0;
         else nfilled = 1;
         while(i < len) {
             kmer <<= 2;
-            if((kmer |= lut4b[bam_seqi(data, i)]) == BF)
+            if((kmer |= lut4b[bam_seqi(data, i)]) == BF) {
                 kmer = nfilled = 0;
-            else {
-                kmer &= kmer_mask;
-                if(++nfilled == args.k) {
+            } else if(++nfilled == args.k) {
+                    kmer &= kmer_mask;
                     it->second.addh(kmer);
                     if(full_set) full_set->addh(kmer);
                     --nfilled;
-                }
             }
             ++i;
         }
@@ -232,7 +230,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
                     return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
                 });
                 if(it != q.end()) q.erase(it);
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
         }
         return EXIT_SUCCESS;
@@ -247,7 +245,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     auto pp = ptrs;
     for(auto &&pair: map) {
         *bcp++ = pair.first;
-        new(pp++) SketchType(std::move(pair.second));
+        new(pp++) FinalType(std::move(pair.second));
     }
     {decltype(map) tmap(std::move(map));} // Free map now that it's not needed
     distmat->resize(map_size);
@@ -266,16 +264,15 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     // Core distance code
 #if __cplusplus >= 201703L
     std::destroy_n(
-#ifdef USE_PAR_EX
+#  ifdef USE_PAR_EX
         std::execution::par_unseq,
-#endif
+#  endif
         ptrs, map_size);
 #else
     std::for_each(ptrs, pp, [](auto &sketch) {sketch.~FinalType();});
 #endif
     std::free(ptrs);
     if(rc != EOF) std::fprintf(stderr, "Warning: Wrong error code from rc: %d\n", rc);
-    delete full_set;
     return rc;
 }
 
