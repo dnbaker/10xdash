@@ -49,7 +49,7 @@ int bam_usage() {
                          "-B\tUse Bloom Filters for sketches. These become more accurate with very large sketches. Default: HLL\n"
                          "-K\tUse full hash sets instead of sketches. These are exact, but expensive to compare and require a relatively larger amount of memory. Default: HLL\n"
                          "-M\tUse bottom-k minhash. Default: HLL\n"
-                         "-M\tUse counting bottom-k minhash histogram intersection. Default: HLL\n"
+                         "-C\tUse counting bottom-k minhash histogram intersection. Default: HLL\n"
                          "-S\tSketch size in bytes, log2. Default: 8 (256 bytes per sketch)\n"
                          "-k\tKmer length. Default: 31\n"
                          "-f\tFail all reads without all bits in argument set. This can be specified multiple times. Default: 0\n"
@@ -61,6 +61,8 @@ int bam_usage() {
                          "-s\tIncrement in log2 size of full experiment sketch in bytes. Default: 0\n"
                          "-R\tMap reserve size. Pre-allocate this much space in the hash table. Default: 1 << 16\n"
                          "-z\tOutput zlib compression level. Set to 0 for uncompressed. Default: 0\n"
+                         "-w\tWrite sketches to disk. This will be done in one file per barcode\n"
+                         "-D\tDo not perform distance calculations. (This should only be done is -w is specified.)\n"
                           "-h/-?\tEmit this usage menu.\n"
                  , ex, ex);
     return EXIT_FAILURE;
@@ -118,7 +120,8 @@ struct CLIArgs {
     int k = 31;
     int compression_level = 0;
     bool skip_full = false;
-    bool write_sketches_only = false;
+    bool write_sketches = false;
+    bool skip_distance = false;
     bool write_human_readable = true;
     size_t map_reserve_size = 1 << 16;
     samFile *fp = nullptr;
@@ -218,21 +221,23 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
             full_set->write(opath.data());
         });
     }
-    if(args.write_sketches_only) {
-        std::list<std::future<void>> q;
+    std::list<std::future<void>> q;
+    if(args.write_sketches) {
         for(const auto &pair: map) {
             q.emplace_back(std::async(std::launch::async, [&]() {
                 std::string opath = std::to_string(pair.first) + SketchFileSuffux<SketchType>::suffix;
                 pair.second.write(opath.data());
             }));
             while(q.size() >= args.nthreads) {
-                auto it = std::find_if(q.begin(), q.end(), [&](auto &future) {
-                    return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-                });
-                if(it != q.end()) q.erase(it);
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                for(auto it = q.begin(); it != q.end();) {
+                    if(it->wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                        q.erase(it++);
+                    else ++it;
+                }
             }
         }
+    }
+    if(args.skip_distance) {
         return EXIT_SUCCESS;
     }
     const size_t map_size = map.size();
@@ -281,10 +286,11 @@ int bam_main(int argc, char *argv[]) {
     CLIArgs args;
     ketopt_t opt = KETOPT_INIT;
     int rc;
-    while((rc = ketopt(&opt, argc, argv, 0, "s:o:k:R:p:S:z:f:F:PKCdwdBbrh?", nullptr)) >= 0) {
+    while((rc = ketopt(&opt, argc, argv, 0, "s:o:k:R:p:S:z:f:F:DPKCdwdBbrh?", nullptr)) >= 0) {
         switch(rc) {
             case 'B': args.sketch_type = BLOOM_FILTER; break;
             case 'C': args.sketch_type = COUNTING_RANGE_MINHASH; break;
+            case 'D': args.skip_distance = true; break;
             case 'K': args.sketch_type = FULL_KHASH_SET; break;
             case 'P': args.skip_full = true; break;
             case 'R': args.map_reserve_size = std::strtoull(opt.arg, nullptr, 10); break;
@@ -298,7 +304,7 @@ int bam_main(int argc, char *argv[]) {
             case 'p': args.nthreads = std::atoi(opt.arg); assert(args.nthreads > 0); break;
             case 'r': args.tag = UR; break;
             case 's': args.full_sketch_size_l2_diff = std::atoi(opt.arg); break;
-            case 'w': args.write_sketches_only = true; break;
+            case 'w': args.write_sketches = true; break;
             case 'z': args.compression_level = std::atoi(optarg) % 10; break; break;
             case 'h': case '?': return bam_usage();
         }
