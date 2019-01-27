@@ -78,8 +78,17 @@ enum Sketch {
     FULL_KHASH_SET = 3,
     HYPERMINHASH = 4, // Not yet supported
     COUNTING_RANGE_MINHASH = 5 // Not yet supported
-    TF_IDF_COUNTING_RANGE_MINHASH = 6 // Not yet supported
 };
+
+template<typename T>
+double similarity(const T &a, const T &b) {
+    return jaccard_index(a, b);
+}
+using CRMFinal = mh::FinalCRMinHash<uint64_t, std::greater<uint64_t>, uint32_t>;
+template<>
+double similarity<CRMFinal>(const CRMFinal &a, const CRMFinal &b) {
+    return a.histogram_intersection(b);
+}
 
 struct khset64_t: public kh::khset64_t {
     void addh(uint64_t v) {this->insert(v);}
@@ -121,8 +130,9 @@ struct CLIArgs {
             case HLL: return nblog2;
             case BLOOM_FILTER: return nblog2 + 3; // 8 bits per byte
             case HYPERMINHASH: return nblog2 - 1; // Assuming 16-bit HMH
-            case RANGE_MINHASH: return size_t(1) << nblog2;
+            case RANGE_MINHASH: return size_t(1) << (nblog2 - 3); // 8 bytes per minimizer
             case FULL_KHASH_SET: return size_t(1) << nblog2; // No real reason
+            case COUNTING_RANGE_MINHASH: return size_t(1) << (nblog2) / (sizeof(uint64_t) + sizeof(uint32_t));
             default: RUNTIME_ERROR("Impocerous!"); return -1337;
         }
         
@@ -138,6 +148,9 @@ struct FinalSketch {
 };
 template<> struct FinalSketch<mh::RangeMinHash<uint64_t>> {
     using final_type = typename mh::RangeMinHash<uint64_t>::final_type;
+};
+template<> struct FinalSketch<mh::CountingRangeMinHash<uint64_t>> {
+    using final_type = typename mh::CountingRangeMinHash<uint64_t>::final_type;
 };
 
 template<typename SketchType, typename... Args>
@@ -225,7 +238,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
             #pragma omp parallel for
             for(size_t j = i + 1; j < map_size; ++j) {
                 assert(j >= i - 1 && (j - i - 1 <= span.second));
-                span.first[j - i - 1] = jaccard_index(cmpsketch, ptrs[j]);
+                span.first[j - i - 1] = similarity(cmpsketch, ptrs[j]);
             }
         }
     }
@@ -282,6 +295,7 @@ int bam_main(int argc, char *argv[]) {
         case BLOOM_FILTER: core<bf::bf_t>(args, &distances, &bcs); break;
         case RANGE_MINHASH: core<mh::RangeMinHash<uint64_t>>(args, &distances, &bcs); break;
         case FULL_KHASH_SET: core<khset64_t>(args, &distances, &bcs); break;
+        case COUNTING_RANGE_MINHASH: core<mh::CountingRangeMinHash<uint64_t>>(args, &distances, &bcs); break;
         default: throw std::runtime_error(std::string("NotImplemented sketch type ") + std::to_string(args.sketch_type));
     }
     if(distances.size()) {
