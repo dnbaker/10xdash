@@ -81,7 +81,8 @@ enum Sketch {
     RANGE_MINHASH = 2,
     FULL_KHASH_SET = 3,
     COUNTING_RANGE_MINHASH = 4,
-    HYPERMINHASH = 5, // Not yet supported
+    HYPERMINHASH16 = 5,
+    HYPERMINHASH32 = 6
 };
 
 template<typename T>
@@ -134,7 +135,8 @@ struct CLIArgs {
         switch(sketch) {
             case HLL: return nblog2;
             case BLOOM_FILTER: return nblog2 + 3; // 8 bits per byte
-            case HYPERMINHASH: return nblog2 - 1; // Assuming 16-bit HMH
+            case HYPERMINHASH16: return nblog2 - 1; // Assuming 16-bit HMH
+            case HYPERMINHASH32: return nblog2 - 2; // Assuming 16-bit HMH
             case RANGE_MINHASH: return size_t(1) << (nblog2 - 3); // 8 bytes per minimizer
             case FULL_KHASH_SET: return size_t(1) << nblog2; // No real reason
             case COUNTING_RANGE_MINHASH: return size_t(1) << (nblog2) / (sizeof(uint64_t) + sizeof(uint32_t));
@@ -291,6 +293,8 @@ int bam_main(int argc, char *argv[]) {
             case 'B': args.sketch_type = BLOOM_FILTER; break;
             case 'C': args.sketch_type = COUNTING_RANGE_MINHASH; break;
             case 'D': args.skip_distance = true; break;
+            case 'H': args.sketch_type = HYPERMINHASH16;
+            case '3': args.sketch_type = HYPERMINHASH32;
             case 'K': args.sketch_type = FULL_KHASH_SET; break;
             case 'P': args.skip_full = true; break;
             case 'R': args.map_reserve_size = std::strtoull(opt.arg, nullptr, 10); break;
@@ -321,6 +325,8 @@ int bam_main(int argc, char *argv[]) {
         case RANGE_MINHASH: core<mh::RangeMinHash<uint64_t>>(args, &distances, &bcs); break;
         case FULL_KHASH_SET: core<khset64_t>(args, &distances, &bcs); break;
         case COUNTING_RANGE_MINHASH: core<mh::CountingRangeMinHash<uint64_t>>(args, &distances, &bcs); break;
+        case HYPERMINHASH16: core<mh::HyperMinHash<uint64_t>>(args, &distances, &bcs, 10); break;
+        case HYPERMINHASH32: core<mh::HyperMinHash<uint64_t>>(args, &distances, &bcs, 26); break;
         default: throw std::runtime_error(std::string("NotImplemented sketch type ") + std::to_string(args.sketch_type));
     }
     if(distances.size()) {
