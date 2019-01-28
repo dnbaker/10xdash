@@ -76,13 +76,14 @@ static const int8_t lut4b [] {
 };
 
 enum Sketch {
-    HLL = 0,
-    BLOOM_FILTER = 1,
-    RANGE_MINHASH = 2,
-    FULL_KHASH_SET = 3,
-    COUNTING_RANGE_MINHASH = 4,
-    HYPERMINHASH16 = 5,
-    HYPERMINHASH32 = 6
+    HLL,
+    BLOOM_FILTER,
+    RANGE_MINHASH,
+    FULL_KHASH_SET,
+    COUNTING_RANGE_MINHASH,
+    TF_IDF_COUNTING_RANGE_MINHASH,
+    HYPERMINHASH16,
+    HYPERMINHASH32,
 };
 
 template<typename T>
@@ -312,6 +313,9 @@ int bam_main(int argc, char *argv[]) {
             case 'z': args.compression_level = std::atoi(optarg) % 10; break; break;
             case 'h': case '?': return bam_usage();
         }
+    }
+    if(args.sketch_type == HYPERMINHASH16 || args.sketch_type == HYPERMINHASH32) {
+        std::fprintf(stderr, "Warning: something seems wrong with this HyperMinHash draft implementation. It is experimental and not as accurate as other, more vetted methods.\n");
     }
     samFile *fp;
     bam_hdr_t *hdr;
