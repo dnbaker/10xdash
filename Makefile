@@ -10,17 +10,11 @@ LIB=-lcurl -lz
 
 OBJ=bonsai/clhash/clhash.o htslib/libhts.a
 all: 10xdash libhts.a
-htslib/configure:
-	cd htslib && autoreconf
-htslib/Makefile: htslib/configure
-	cd htslib && ./configure --disable-lzma --disable-bz2
 htslib/libhts.a: htslib/Makefile
-	+cd htslib && make libhts.a && cp ..
-libhts.a: htslib/libhts.a
-	cp $< $@
+	+cd htslib && (ls Makefile || autoreconf && ./configure) && make libhts.a
 bonsai/clhash/clhash.o: bonsai/clhash/src/clhash.c
 	cd bonsai/clhash && make clhash.o
-OBJ=libhts.a bonsai/clhash/clhash.o
+OBJ=htslib/libhts.a bonsai/clhash/clhash.o
 
 
 CXXFLAGS+= -march=native -O3 -std=c++17

@@ -4,6 +4,7 @@
 #include "bonsai/hll/hll.h"
 #include "bonsai/hll/ccm.h"
 #include "bonsai/hll/mh.h"
+#include "bonsai/hll/bbmh.h"
 #include "distmat/distmat.h"
 #include "htslib/htslib/sam.h"
 #include "klib/ketopt.h"
@@ -81,16 +82,31 @@ enum Sketch {
     RANGE_MINHASH,
     FULL_KHASH_SET,
     COUNTING_RANGE_MINHASH,
-    TF_IDF_COUNTING_RANGE_MINHASH,
     HYPERMINHASH16,
     HYPERMINHASH32,
+    TF_IDF_COUNTING_RANGE_MINHASH, // TODO. I'm willing to make two passes through the data for this.
+    BB_MINHASH, // TODO
+    COUNTING_BB_MINHASH, // TODO
 };
 
+static const char *sketch_names [] {
+    "HLL",
+    "BLOOM_FILTER",
+    "RANGE_MINHASH",
+    "FULL_KHASH_SET",
+    "COUNTING_RANGE_MINHASH",
+    "HYPERMINHASH16",
+    "HYPERMINHASH32",
+    "TF_IDF_COUNTING_RANGE_MINHASH",
+    "BB_MINHASH",
+    "COUNTING_BB_MINHASH",
+};
+
+using CRMFinal = mh::FinalCRMinHash<uint64_t, std::greater<uint64_t>, uint32_t>;
 template<typename T>
 double similarity(const T &a, const T &b) {
     return jaccard_index(a, b);
 }
-using CRMFinal = mh::FinalCRMinHash<uint64_t, std::greater<uint64_t>, uint32_t>;
 template<>
 double similarity<CRMFinal>(const CRMFinal &a, const CRMFinal &b) {
     return a.histogram_intersection(b);
@@ -105,9 +121,7 @@ struct khset64_t: public kh::khset64_t {
         if(size() > other.size())
             std::swap(p1, p2);
         size_t olap = 0;
-        p1->for_each([&](auto v) {
-            olap += p2->contains(v);
-        });
+        p1->for_each([&](auto v) {olap += p2->contains(v);});
         return static_cast<double>(olap) / (p1->size() + p2->size() - olap);
     }
 };
@@ -141,31 +155,39 @@ struct CLIArgs {
             case RANGE_MINHASH: return size_t(1) << (nblog2 - 3); // 8 bytes per minimizer
             case FULL_KHASH_SET: return size_t(1) << nblog2; // No real reason
             case COUNTING_RANGE_MINHASH: return size_t(1) << (nblog2) / (sizeof(uint64_t) + sizeof(uint32_t));
-            default: RUNTIME_ERROR("Impocerous!"); return -1337;
+            default: {
+                char buf[128];
+                std::sprintf(buf, "Sketch %s not yet supported.\n", (sketch >= (sizeof(sketch_names) / sizeof(char *)) ? "Not such sketch": sketch_names[sketch]));
+                RUNTIME_ERROR(buf);
+                return -1337;
+            }
         }
 
     }
-    int next_rec(bam1_t *b) {
-        return sam_read1(fp, hdr, b);
-    }
+    int next_rec(bam1_t *b) {return sam_read1(fp, hdr, b);}
 };
 
+using CBBMinHashType = mh::CountingBBitMinHasher<uint64_t, uint32_t>; // Is counting to 65536 enough for a transcriptome? Maybe we can use 16...
 template<typename SketchType>
 struct FinalSketch {
     using final_type = SketchType;
 };
-template<> struct FinalSketch<mh::RangeMinHash<uint64_t>> {
-    using final_type = typename mh::RangeMinHash<uint64_t>::final_type;
-};
-template<> struct FinalSketch<mh::CountingRangeMinHash<uint64_t>> {
-    using final_type = typename mh::CountingRangeMinHash<uint64_t>::final_type;
-};
+#define FINAL_OVERLOAD(type) \
+template<> struct FinalSketch<type> { \
+    using final_type = typename type::final_type;}
+FINAL_OVERLOAD(mh::CountingRangeMinHash<uint64_t>);
+FINAL_OVERLOAD(mh::RangeMinHash<uint64_t>);
+FINAL_OVERLOAD(mh::BBitMinHasher<uint64_t>);
+FINAL_OVERLOAD(CBBMinHashType);
+
 template<typename T>struct SketchFileSuffux {static constexpr const char *suffix = ".sketch";};
 #define SSS(type, suf) template<> struct SketchFileSuffux<type> {static constexpr const char *suffix = suf;}
 SSS(mh::CountingRangeMinHash<uint64_t>, ".crmh");
 SSS(mh::RangeMinHash<uint64_t>, ".rmh");
 SSS(khset64_t, ".khs");
 SSS(bf::bf_t, ".bf");
+SSS(mh::BBitMinHasher<uint64_t>, ".bmh");
+SSS(CBBMinHashType, ".cbmh");
 SSS(mh::HyperMinHash<uint64_t>, ".hmh");
 SSS(hll::hll_t, ".hll");
 
@@ -177,9 +199,9 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     map.reserve(args.map_reserve_size); // why not?
     sketch::common::WangHash hasher;
     const uint64_t kmer_mask = UINT64_C(-1) >> (64 - (args.k * 2));
-    std::unique_ptr<SketchType> full_set =
+    SketchType *full_set =
         args.skip_full ? nullptr
-                       : std::make_unique<SketchType>(args.bytesl2_to_arg(
+                       : new SketchType(args.bytesl2_to_arg(
                                             args.sketch_size_l2 +
                                                 args.full_sketch_size_l2_diff, args.sketch_type),
                                           std::forward<Args>(sketchargs)...);
@@ -207,10 +229,10 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
             if((kmer |= lut4b[bam_seqi(data, i)]) == BF) {
                 kmer = nfilled = 0;
             } else if(++nfilled == args.k) {
-                    kmer &= kmer_mask;
-                    it->second.addh(kmer);
-                    if(full_set) full_set->addh(kmer);
-                    --nfilled;
+                kmer &= kmer_mask;
+                it->second.addh(kmer);
+                if(full_set) full_set->addh(kmer);
+                --nfilled;
             }
             ++i;
         }
@@ -222,6 +244,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
         opath += SketchFileSuffux<SketchType>::suffix;
         full_writer = std::async(std::launch::async, [&]() {
             full_set->write(opath.data());
+            delete full_set;
         });
     }
     std::list<std::future<void>> q;
@@ -240,9 +263,8 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
             }
         }
     }
-    if(args.skip_distance) {
+    if(args.skip_distance)
         return EXIT_SUCCESS;
-    }
     const size_t map_size = map.size();
     using FinalType = typename FinalSketch<SketchType>::final_type;
     FinalType *ptrs;
@@ -288,6 +310,8 @@ int bam_main(int argc, char *argv[]) {
     if(argc == 1) return bam_usage();
     CLIArgs args;
     ketopt_t opt = KETOPT_INIT;
+    // TODO: Add count{,min}-sketch filtering for errors in sequencing
+    // TODO: Perform richer comparisons based on regions within the genome
     int rc;
     while((rc = ketopt(&opt, argc, argv, 0, "s:o:k:R:p:S:z:f:F:DPKCdwdBbrh?", nullptr)) >= 0) {
         switch(rc) {
@@ -331,7 +355,11 @@ int bam_main(int argc, char *argv[]) {
         case COUNTING_RANGE_MINHASH: core<mh::CountingRangeMinHash<uint64_t>>(args, &distances, &bcs); break;
         case HYPERMINHASH16: core<mh::HyperMinHash<uint64_t>>(args, &distances, &bcs, 10); break;
         case HYPERMINHASH32: core<mh::HyperMinHash<uint64_t>>(args, &distances, &bcs, 26); break;
-        default: throw std::runtime_error(std::string("NotImplemented sketch type ") + std::to_string(args.sketch_type));
+        default: {
+            char buf[128];
+            std::sprintf(buf, "Sketch %s not yet supported.\n", args.sketch_type >= sizeof(sketch_names) / sizeof(char *) ? "Not such sketch": sketch_names[args.sketch_type]);
+            RUNTIME_ERROR(buf);
+        }
     }
     if(distances.size()) {
         std::string opath = args.omatpath ? args.omatpath: (std::string(argv[opt.ind]) + ".distmat").data();
@@ -342,8 +370,7 @@ int bam_main(int argc, char *argv[]) {
             std::for_each(bcs, bcs + distances.size(), [ofp](auto bc) {gzprintf(ofp, "\t%u", bc);});
             gzputc(ofp, '\n');
             distances.printf(ofp, true); // Always emit scientific fmt for now
-        }
-        else {
+        } else {
             std::FILE *cfp = std::fopen((opath + ".labels").data(), "w");
             if(!cfp) RUNTIME_ERROR(std::string("Could not open file at ") + opath + ".labels");
             std::fprintf(cfp, "#Barcodes\n");
