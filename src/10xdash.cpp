@@ -77,7 +77,7 @@ struct CLIArgs {
             case RANGE_MINHASH: return size_t(1) << (nblog2 - 3); // 8 bytes per minimizer
             case FULL_KHASH_SET: return size_t(1) << nblog2; // No real reason
             case COUNTING_RANGE_MINHASH: return size_t(1) << (nblog2) / (sizeof(uint64_t) + sizeof(uint32_t));
-            case BB_MINHASH: bbnbits; // since b comes before p for this constructor. TODO: consider allowing different values.
+            case BB_MINHASH: return nblog2 - std::ceil(std::log2(bbnbits / 8));
             default: {
                 char buf[128];
                 std::sprintf(buf, "Sketch %s not yet supported.\n", (sketch >= (sizeof(sketch_names) / sizeof(char *)) ? "Not such sketch": sketch_names[sketch]));
@@ -269,7 +269,7 @@ int bam_main(int argc, char *argv[]) {
         case COUNTING_RANGE_MINHASH: core<mh::CountingRangeMinHash<uint64_t>>(args, &distances, &bcs); break;
         case HYPERMINHASH16: core<mh::HyperMinHash<uint64_t>>(args, &distances, &bcs, 10); break;
         case HYPERMINHASH32: core<mh::HyperMinHash<uint64_t>>(args, &distances, &bcs, 26); break;
-        case BB_MINHASH:    core<mh::BBitMinHasher<uint64_t>>(args, &distances, &bcs, args.sketch_size_l2 - std::ceil(std::log2(bbnbits / 8))); break;
+        case BB_MINHASH:    core<mh::BBitMinHasher<uint64_t>>(args, &distances, &bcs, bbnbits); break;
         default: {
             char buf[128];
             std::sprintf(buf, "Sketch %s not yet supported.\n", args.sketch_type >= sizeof(sketch_names) / sizeof(char *) ? "Not such sketch": sketch_names[args.sketch_type]);
