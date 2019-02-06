@@ -1,10 +1,5 @@
-#include "bonsai/bonsai/include/util.h"
 #include "bonsai/bonsai/include/bitmap.h"
 #include "bonsai/bonsai/include/setcmp.h"
-#include "bonsai/hll/hll.h"
-#include "bonsai/hll/ccm.h"
-#include "bonsai/hll/mh.h"
-#include "bonsai/hll/bbmh.h"
 #include "distmat/distmat.h"
 #include "htslib/htslib/sam.h"
 #include "klib/ketopt.h"
@@ -12,7 +7,8 @@
 #include <new>
 #include <list>
 #include <omp.h>
-#include "khset/khset.h"
+#include "include/sketch_help.h"
+#include "include/util.h"
 #if __cplusplus >= 201703L
 #  include <memory>
 #  if __has_include(<execution>)
@@ -20,30 +16,12 @@
 #    include <execution>
 #  endif
 #endif
-using namespace sketch;
 using namespace bns;
-//using namespace common;
-using namespace hll;
+using namespace tenx;
 
 static const char *ex = nullptr;
-
-u32 encode_bc(const char *s) {
-    // Be willing to consider parsing the last integer describing the GEM group
-    const char *e = s + 16;
-    u32 ret = cstr_lut[*s++];
-    while(s != e) ret <<= 2, ret |= cstr_lut[*s++];
-    return ret;
-}
-
-enum BCType {
-    CB = 0,
-    UB = 1,
-    UR = 2
-};
-
-static const char *tags[] {
-    "CB", "UB", "UR"
-};
+static uint32_t bbnbits = 16;
+static const char *suf = ".unset_suffix";
 
 int bam_usage() {
     std::fprintf(stderr, "Usage:\n%s <flags> in.{sb}am\n%s currently does not assume any sorted ordering or alignment and compares by HLLs by default.\n"
@@ -69,65 +47,6 @@ int bam_usage() {
     return EXIT_FAILURE;
 }
 
-static const int8_t lut4b [] {
-    -1, 0, 1, -1, 2, -1, -1, -1, 3, -1, -1, -1, -1, -1, -1, -1
-    // For 4-bit nucleotides
-    // We ignore anything that isn't A, C, G, or T
-    // the |= -1 converts the kmer to UINT64_C(-1), which we reserve as an error code.
-};
-
-enum Sketch {
-    HLL,
-    BLOOM_FILTER,
-    RANGE_MINHASH,
-    FULL_KHASH_SET,
-    COUNTING_RANGE_MINHASH,
-    HYPERMINHASH16,
-    HYPERMINHASH32,
-    TF_IDF_COUNTING_RANGE_MINHASH, // TODO. I'm willing to make two passes through the data for this.
-    BB_MINHASH,
-    COUNTING_BB_MINHASH, // TODO
-};
-
-static const char *sketch_names [] {
-    "HLL",
-    "BLOOM_FILTER",
-    "RANGE_MINHASH",
-    "FULL_KHASH_SET",
-    "COUNTING_RANGE_MINHASH",
-    "HYPERMINHASH16",
-    "HYPERMINHASH32",
-    "TF_IDF_COUNTING_RANGE_MINHASH",
-    "BB_MINHASH",
-    "COUNTING_BB_MINHASH",
-};
-
-using CRMFinal = mh::FinalCRMinHash<uint64_t, std::greater<uint64_t>, uint32_t>;
-template<typename T>
-double similarity(const T &a, const T &b) {
-    return jaccard_index(a, b);
-}
-template<>
-double similarity<CRMFinal>(const CRMFinal &a, const CRMFinal &b) {
-    return a.histogram_intersection(b);
-}
-
-struct khset64_t: public kh::khset64_t {
-    void addh(uint64_t v) {this->insert(v);}
-    khset64_t(): kh::khset64_t() {}
-    khset64_t(size_t reservesz): kh::khset64_t(reservesz) {}
-    double jaccard_index(const khset64_t &other) const {
-        auto p1 = this, p2 = &other;
-        if(size() > other.size())
-            std::swap(p1, p2);
-        size_t olap = 0;
-        p1->for_each([&](auto v) {olap += p2->contains(v);});
-        return static_cast<double>(olap) / (p1->size() + p2->size() - olap);
-    }
-};
-
-
-static uint32_t bbnbits = 16;
 
 struct CLIArgs {
     int nthreads = 1;
@@ -141,6 +60,7 @@ struct CLIArgs {
     bool write_sketches = false;
     bool skip_distance = false;
     bool write_human_readable = true;
+    std::string write_binary_bc_sketch_pairs;
     size_t map_reserve_size = 1 << 16;
     samFile *fp = nullptr;
     bam_hdr_t *hdr = nullptr;
@@ -170,33 +90,11 @@ struct CLIArgs {
     int next_rec(bam1_t *b) {return sam_read1(fp, hdr, b);}
 };
 
-using CBBMinHashType = mh::CountingBBitMinHasher<uint64_t, uint32_t>; // Is counting to 65536 enough for a transcriptome? Maybe we can use 16...
-template<typename SketchType>
-struct FinalSketch {
-    using final_type = SketchType;
-};
-#define FINAL_OVERLOAD(type) \
-template<> struct FinalSketch<type> { \
-    using final_type = typename type::final_type;}
-FINAL_OVERLOAD(mh::CountingRangeMinHash<uint64_t>);
-FINAL_OVERLOAD(mh::RangeMinHash<uint64_t>);
-FINAL_OVERLOAD(mh::BBitMinHasher<uint64_t>);
-FINAL_OVERLOAD(CBBMinHashType);
-
-template<typename T>struct SketchFileSuffux {static constexpr const char *suffix = ".sketch";};
-#define SSS(type, suf) template<> struct SketchFileSuffux<type> {static constexpr const char *suffix = suf;}
-SSS(mh::CountingRangeMinHash<uint64_t>, ".crmh");
-SSS(mh::RangeMinHash<uint64_t>, ".rmh");
-SSS(khset64_t, ".khs");
-SSS(bf::bf_t, ".bf");
-SSS(mh::BBitMinHasher<uint64_t>, ".bmh");
-SSS(CBBMinHashType, ".cbmh");
-SSS(mh::HyperMinHash<uint64_t>, ".hmh");
-SSS(hll::hll_t, ".hll");
 
 template<typename SketchType, typename... Args>
 int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args &&... sketchargs) {
     const char *const tag = tags[args.tag];
+    suf = SketchFileSuffix<SketchType>::suffix;
     bam1_t *b = bam_init1();
     ska::flat_hash_map<u32, SketchType> map;
     map.reserve(args.map_reserve_size); // why not?
@@ -244,7 +142,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     std::future<void> full_writer;
     if(full_set) {
         std::string opath = args.fp->fn;
-        opath += SketchFileSuffux<SketchType>::suffix;
+        opath += SketchFileSuffix<SketchType>::suffix;
         full_writer = std::async(std::launch::async, [&]() {
             full_set->write(opath.data());
             delete full_set;
@@ -254,7 +152,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     if(args.write_sketches) {
         for(const auto &pair: map) {
             q.emplace_back(std::async(std::launch::async, [&]() {
-                std::string opath = std::to_string(pair.first) + SketchFileSuffux<SketchType>::suffix;
+                std::string opath = std::to_string(pair.first) + SketchFileSuffix<SketchType>::suffix;
                 pair.second.write(opath.data());
             }));
             while(q.size() >= args.nthreads) {
@@ -265,6 +163,17 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
                 }
             }
         }
+    }
+    if(args.write_binary_bc_sketch_pairs.size()) {
+        auto names = args.write_binary_bc_sketch_pairs + SketchFileSuffix<SketchType>::suffix;
+        gzFile fp = gzopen(names.data(), "wb");
+        uint64_t nsketches = map.size();
+        gzwrite(fp, &nsketches, sizeof(nsketches));
+        for(const auto &pair: map) {
+            gzwrite(fp, &pair.first, sizeof(pair.first)); // Write 32-bit int.
+            pair.second.write(fp);
+        }
+        gzclose(fp);
     }
     if(args.skip_distance)
         return EXIT_SUCCESS;
@@ -316,22 +225,23 @@ int bam_main(int argc, char *argv[]) {
     // TODO: Add count{,min}-sketch filtering for errors in sequencing
     // TODO: Perform richer comparisons based on regions within the genome
     int rc;
-    while((rc = ketopt(&opt, argc, argv, 0, "s:o:k:R:p:S:z:f:F:N:DPKCdwdBbrh?", nullptr)) >= 0) {
+    while((rc = ketopt(&opt, argc, argv, 0, "W:s:o:k:R:p:S:z:f:F:N:DPKCdwdBbrh?", nullptr)) >= 0) {
         switch(rc) {
-            case 'N': bbnbits = std::atoi(optarg); break;
+            case '3': args.sketch_type = HYPERMINHASH32;
             case 'B': args.sketch_type = BLOOM_FILTER; break;
             case 'C': args.sketch_type = COUNTING_RANGE_MINHASH; break;
             case 'D': args.skip_distance = true; break;
+            case 'F': args.required_flags |= std::atoi(optarg); break;
             case 'H': args.sketch_type = HYPERMINHASH16;
-            case '3': args.sketch_type = HYPERMINHASH32;
             case 'K': args.sketch_type = FULL_KHASH_SET; break;
+            case 'N': bbnbits = std::atoi(optarg); break;
             case 'P': args.skip_full = true; break;
             case 'R': args.map_reserve_size = std::strtoull(opt.arg, nullptr, 10); break;
+            case 'W': args.write_binary_bc_sketch_pairs = opt.arg; break;
             case 'S': args.sketch_size_l2 = std::atoi(opt.arg); break;
             case 'b': args.tag = UB; break;
             case 'd': args.write_human_readable = false;
             case 'f': args.fail_flags |= std::atoi(optarg); break;
-            case 'F': args.required_flags |= std::atoi(optarg); break;
             case 'k': args.k = std::atoi(opt.arg); break;
             case 'o': args.omatpath = optarg; break;
             case 'p': args.nthreads = std::atoi(opt.arg); assert(args.nthreads > 0); break;
