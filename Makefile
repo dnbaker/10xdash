@@ -17,7 +17,7 @@ bonsai/clhash/clhash.o: bonsai/clhash/src/clhash.c
 OBJ=htslib/libhts.a bonsai/clhash/clhash.o
 
 
-CXXFLAGS+= -march=native -O3 -std=c++17
+CXXFLAGS+= -march=native -O3 -std=c++14
 FLAGS+= $(CXXFLAGS) -fopenmp
 
 %: src/%.cpp $(OBJ)
