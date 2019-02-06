@@ -10,10 +10,8 @@ LIB=-lcurl -lz
 
 OBJ=bonsai/clhash/clhash.o htslib/libhts.a
 all: 10xdash htslib/libhts.a
-htslib/Makefile:
-	cd htslib && autoreconf && ./configure --disable-lzma --disable-bz2
-htslib/libhts.a: htslib/Makefile
-	+cd htslib && make libhts.a
+htslib/libhts.a:
+	cd htslib && autoheader && autoconf && ./configure --disable-lzma --disable-bz2 && make libhts.a
 bonsai/clhash/clhash.o: bonsai/clhash/src/clhash.c
 	cd bonsai/clhash && make clhash.o
 OBJ=htslib/libhts.a bonsai/clhash/clhash.o
