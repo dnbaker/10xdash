@@ -46,9 +46,14 @@ double similarity<CRMFinal>(const CRMFinal &a, const CRMFinal &b) {
 }
 
 struct khset64_t: public kh::khset64_t {
+    using super = kh::khset64_t;
     void addh(uint64_t v) {this->insert(v);}
     khset64_t(): kh::khset64_t() {}
     khset64_t(size_t reservesz): kh::khset64_t(reservesz) {}
+    khset64_t(const khset64_t &o): super(*reinterpret_cast<const super *>(&o)) {}
+    khset64_t(khset64_t &&o): kh::khset64_t() /* memset(0) initialization */ {
+        std::swap_ranges((uint8_t *)this, (uint8_t *)this + sizeof(*this), (uint8_t *)std::addressof(o));
+    }
     double jaccard_index(const khset64_t &other) const {
         auto p1 = this, p2 = &other;
         if(size() > other.size())
