@@ -98,7 +98,6 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     bam1_t *b = bam_init1();
     ska::flat_hash_map<u32, SketchType> map;
     map.reserve(args.map_reserve_size); // why not?
-    sketch::common::WangHash hasher;
     const uint64_t kmer_mask = UINT64_C(-1) >> (64 - (args.k * 2));
     SketchType *full_set =
         args.skip_full ? nullptr
@@ -155,7 +154,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
                 std::string opath = std::to_string(pair.first) + SketchFileSuffix<SketchType>::suffix;
                 pair.second.write(opath.data());
             }));
-            while(q.size() >= args.nthreads) {
+            while(q.size() >= unsigned(args.nthreads)) {
                 for(auto it = q.begin(); it != q.end();) {
                     if(it->wait_for(std::chrono::seconds(0)) == std::future_status::ready)
                         q.erase(it++);
@@ -180,7 +179,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     const size_t map_size = map.size();
     using FinalType = typename FinalSketch<SketchType>::final_type;
     FinalType *ptrs;
-    if(ptrs == nullptr) throw std::bad_alloc();
+    if((ptrs = static_cast<FinalType *>(std::malloc(sizeof(*ptrs) * map_size))) == nullptr) throw std::bad_alloc();
     uint32_t *barcodes = static_cast<uint32_t *>(std::malloc(sizeof(uint32_t) * map_size)), *bcp = barcodes;
     if(barcodes == nullptr) throw std::bad_alloc();
     *bcs = barcodes;
@@ -226,12 +225,12 @@ int bam_main(int argc, char *argv[]) {
     int rc;
     while((rc = getopt(argc, argv, "W:s:o:k:R:p:S:z:f:F:N:DPKCdwdBbrh?")) >= 0) {
         switch(rc) {
-            case '3': args.sketch_type = HYPERMINHASH32;
+            case '3': args.sketch_type = HYPERMINHASH32; break;
             case 'B': args.sketch_type = BLOOM_FILTER; break;
             case 'C': args.sketch_type = COUNTING_RANGE_MINHASH; break;
             case 'D': args.skip_distance = true; break;
             case 'F': args.required_flags |= std::atoi(optarg); break;
-            case 'H': args.sketch_type = HYPERMINHASH16;
+            case 'H': args.sketch_type = HYPERMINHASH16; break;
             case 'K': args.sketch_type = FULL_KHASH_SET; break;
             case 'N': bbnbits = std::atoi(optarg); break;
             case 'P': args.skip_full = true; break;
@@ -239,7 +238,7 @@ int bam_main(int argc, char *argv[]) {
             case 'W': args.write_binary_bc_sketch_pairs = optarg; break;
             case 'S': args.sketch_size_l2 = std::atoi(optarg); break;
             case 'b': args.tag = UB; break;
-            case 'd': args.write_human_readable = false;
+            case 'd': args.write_human_readable = false; break;
             case 'f': args.fail_flags |= std::atoi(optarg); break;
             case 'k': args.k = std::atoi(optarg); break;
             case 'o': args.omatpath = optarg; break;
@@ -247,7 +246,7 @@ int bam_main(int argc, char *argv[]) {
             case 'r': args.tag = UR; break;
             case 's': args.full_sketch_size_l2_diff = std::atoi(optarg); break;
             case 'w': args.write_sketches = true; break;
-            case 'z': args.compression_level = std::atoi(optarg) % 10; break; break;
+            case 'z': args.compression_level = std::atoi(optarg) % 10; break;
             case 'h': case '?': return bam_usage();
         }
     }
