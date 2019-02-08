@@ -2,7 +2,7 @@
 #include "bonsai/bonsai/include/setcmp.h"
 #include "distmat/distmat.h"
 #include "htslib/htslib/sam.h"
-#include "klib/ketopt.h"
+#include "getopt.h"
 #include "flat_hash_map/flat_hash_map.hpp"
 #include <new>
 #include <list>
@@ -221,11 +221,10 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
 int bam_main(int argc, char *argv[]) {
     if(argc == 1) return bam_usage();
     CLIArgs args;
-    ketopt_t opt = KETOPT_INIT;
     // TODO: Add count{,min}-sketch filtering for errors in sequencing
     // TODO: Perform richer comparisons based on regions within the genome
     int rc;
-    while((rc = ketopt(&opt, argc, argv, 0, "W:s:o:k:R:p:S:z:f:F:N:DPKCdwdBbrh?", nullptr)) >= 0) {
+    while((rc = getopt(argc, argv, "W:s:o:k:R:p:S:z:f:F:N:DPKCdwdBbrh?")) >= 0) {
         switch(rc) {
             case '3': args.sketch_type = HYPERMINHASH32;
             case 'B': args.sketch_type = BLOOM_FILTER; break;
@@ -236,17 +235,17 @@ int bam_main(int argc, char *argv[]) {
             case 'K': args.sketch_type = FULL_KHASH_SET; break;
             case 'N': bbnbits = std::atoi(optarg); break;
             case 'P': args.skip_full = true; break;
-            case 'R': args.map_reserve_size = std::strtoull(opt.arg, nullptr, 10); break;
-            case 'W': args.write_binary_bc_sketch_pairs = opt.arg; break;
-            case 'S': args.sketch_size_l2 = std::atoi(opt.arg); break;
+            case 'R': args.map_reserve_size = std::strtoull(optarg, nullptr, 10); break;
+            case 'W': args.write_binary_bc_sketch_pairs = optarg; break;
+            case 'S': args.sketch_size_l2 = std::atoi(optarg); break;
             case 'b': args.tag = UB; break;
             case 'd': args.write_human_readable = false;
             case 'f': args.fail_flags |= std::atoi(optarg); break;
-            case 'k': args.k = std::atoi(opt.arg); break;
+            case 'k': args.k = std::atoi(optarg); break;
             case 'o': args.omatpath = optarg; break;
-            case 'p': args.nthreads = std::atoi(opt.arg); assert(args.nthreads > 0); break;
+            case 'p': args.nthreads = std::atoi(optarg); assert(args.nthreads > 0); break;
             case 'r': args.tag = UR; break;
-            case 's': args.full_sketch_size_l2_diff = std::atoi(opt.arg); break;
+            case 's': args.full_sketch_size_l2_diff = std::atoi(optarg); break;
             case 'w': args.write_sketches = true; break;
             case 'z': args.compression_level = std::atoi(optarg) % 10; break; break;
             case 'h': case '?': return bam_usage();
@@ -257,8 +256,8 @@ int bam_main(int argc, char *argv[]) {
     }
     samFile *fp;
     bam_hdr_t *hdr;
-    if(!(fp = sam_open(argv[opt.ind], "r"))) RUNTIME_ERROR(std::string("Could not open sam at ") + argv[opt.ind]);
-    if(!(hdr = sam_hdr_read(fp)))            RUNTIME_ERROR(std::string("Could not parse header from file at ") + argv[opt.ind]);
+    if(!(fp = sam_open(argv[optind], "r"))) RUNTIME_ERROR(std::string("Could not open sam at ") + argv[optind]);
+    if(!(hdr = sam_hdr_read(fp)))            RUNTIME_ERROR(std::string("Could not parse header from file at ") + argv[optind]);
     dm::DistanceMatrix<float> distances;
     uint32_t *bcs = nullptr;
     switch(args.sketch_type) {
@@ -277,7 +276,7 @@ int bam_main(int argc, char *argv[]) {
         }
     }
     if(distances.size()) {
-        std::string opath = args.omatpath ? args.omatpath: (std::string(argv[opt.ind]) + ".distmat").data();
+        std::string opath = args.omatpath ? args.omatpath: (std::string(argv[optind]) + ".distmat").data();
         gzFile ofp = gzopen(opath.data(), (std::string("wb") + std::to_string(args.compression_level)).data());
         if(!ofp) RUNTIME_ERROR(std::string("Could not open file for writing at ") + opath.data());
         if(args.write_human_readable) {
