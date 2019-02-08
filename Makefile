@@ -18,8 +18,9 @@ OBJ=htslib/libhts.a bonsai/clhash/clhash.o
 
 
 CXXFLAGS+= -march=native -O3 -std=c++14
+HEADERS=$(wildcard include/*.h)
 FLAGS+= $(CXXFLAGS) -fopenmp
 
-%: src/%.cpp $(OBJ)
+%: src/%.cpp $(OBJ) $(HEADERS)
 	$(CXX)  $(OBJ) $< -o $@ $(INCLUDE) $(FLAGS) $(LD) $(LIB)
 

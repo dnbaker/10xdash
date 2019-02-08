@@ -63,14 +63,18 @@ struct khset64_t: public kh::khset64_t {
         return static_cast<double>(olap) / (p1->size() + p2->size() - olap);
     }
 };
-using CBBMinHashType = mh::CountingBBitMinHasher<uint64_t, uint32_t>; // Is counting to 65536 enough for a transcriptome? Maybe we can use 16...
-template<typename SketchType>
-struct FinalSketch {
-    using final_type = SketchType;
-};
+
+void swap(khset64_t &a, khset64_t &b) {
+    // These are okay to switch bit-by-bit. Provide a swap option.
+    std::swap_ranges((uint8_t *)&a, (uint8_t *)&a + sizeof(a), (uint8_t *)&b);
+}
+
+using CBBMinHashType = mh::CountingBBitMinHasher<uint64_t, uint32_t>; // For now, use 32-bit integers to count
+
+template<typename SketchType> struct FinalSketch {using final_type = SketchType;};
+
 #define FINAL_OVERLOAD(type) \
-template<> struct FinalSketch<type> { \
-    using final_type = typename type::final_type;}
+    template<> struct FinalSketch<type> {using final_type = typename type::final_type;}
 FINAL_OVERLOAD(mh::CountingRangeMinHash<uint64_t>);
 FINAL_OVERLOAD(mh::RangeMinHash<uint64_t>);
 FINAL_OVERLOAD(mh::BBitMinHasher<uint64_t>);
