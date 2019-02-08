@@ -8,19 +8,26 @@ INCLUDE=$(patsubst %,-I%,$(INCDIRS))
 LD=
 LIB=-lcurl -lz
 
-OBJ=bonsai/clhash/clhash.o htslib/libhts.a
 all: 10xdash htslib/libhts.a
 htslib/libhts.a:
 	cd htslib && autoheader && autoconf && ./configure --disable-lzma --disable-bz2 && make libhts.a
+libhts.a: htslib/libhts.a
+	cp htslib/libhts.a libhts.a
 bonsai/clhash/clhash.o: bonsai/clhash/src/clhash.c
 	cd bonsai/clhash && make clhash.o
-OBJ=htslib/libhts.a bonsai/clhash/clhash.o
+OBJ=libhts.a bonsai/clhash/clhash.o
 
 
 CXXFLAGS+= -march=native -O3 -std=c++14
 HEADERS=$(wildcard include/*.h)
-FLAGS+= $(CXXFLAGS) -fopenmp
+WARNINGS=-Wextra -Wall -pedantic -Wno-ignored-attributes -Wno-char-subscripts \
+		 -Wpointer-arith -Wwrite-strings -Wdisabled-optimization \
+		 -Wformat -Wcast-align \
+		 -pedantic -Wunused-variable -Wno-attributes
+FLAGS+= $(WARNINGS) $(CXXFLAGS) -fopenmp -DNOT_THREADSAFE -DENABLE_COMPUTED_GOTO -mpclmul -pipe
 
 %: src/%.cpp $(OBJ) $(HEADERS)
-	$(CXX)  $(OBJ) $< -o $@ $(INCLUDE) $(FLAGS) $(LD) $(LIB)
+	$(CXX)  $< -o $@ $(INCLUDE) $(FLAGS) $(LD) $(LIB) $(OBJ)
 
+clean:
+	rm -f 10xdash $(OBJ) htslib/libhts.a
