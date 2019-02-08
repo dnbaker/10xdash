@@ -6,11 +6,13 @@ CC?=gcc
 INCDIRS=. htslib bonsai/clhash/include bonsai bonsai/hll/ bonsai/libpopcnt bonsai/hll/vec bonsai/circularqueue bonsai/pdqsort
 INCLUDE=$(patsubst %,-I%,$(INCDIRS))
 LD=
-LIB=-lz -lcurl
+LIB=-lz
 
 all: 10xdash htslib/libhts.a
 htslib/libhts.a:
-	cd htslib && autoheader && autoconf && ./configure --disable-lzma --disable-bz2 --enable-libcurl && make libhts.a
+	cd htslib && autoheader && autoconf && \
+    sed -i -e 's:enable_libcurl=check:enable_libcurl=no:' ./configure && \
+    ./configure --disable-lzma --disable-bz2 && make libhts.a
 libhts.a: htslib/libhts.a
 	cp htslib/libhts.a libhts.a
 bonsai/clhash/clhash.o: bonsai/clhash/src/clhash.c
