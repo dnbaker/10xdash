@@ -6,11 +6,11 @@ CC?=gcc
 INCDIRS=. htslib bonsai/clhash/include bonsai bonsai/hll/ bonsai/libpopcnt bonsai/hll/vec bonsai/circularqueue bonsai/pdqsort
 INCLUDE=$(patsubst %,-I%,$(INCDIRS))
 LD=
-LIB=-lcurl -lz
+LIB=-lz -lcurl
 
 all: 10xdash htslib/libhts.a
 htslib/libhts.a:
-	cd htslib && autoheader && autoconf && ./configure --disable-lzma --disable-bz2 && make libhts.a
+	cd htslib && autoheader && autoconf && ./configure --disable-lzma --disable-bz2 --enable-libcurl && make libhts.a
 libhts.a: htslib/libhts.a
 	cp htslib/libhts.a libhts.a
 bonsai/clhash/clhash.o: bonsai/clhash/src/clhash.c
@@ -18,12 +18,13 @@ bonsai/clhash/clhash.o: bonsai/clhash/src/clhash.c
 OBJ=libhts.a bonsai/clhash/clhash.o
 
 
-CXXFLAGS+= -march=native -O3 -std=c++14
+CXXFLAGS+= -march=native -O3 -std=c++14 -fno-strict-aliasing
 HEADERS=$(wildcard include/*.h)
 WARNINGS=-Wextra -Wall -pedantic -Wno-ignored-attributes -Wno-char-subscripts \
 		 -Wpointer-arith -Wwrite-strings -Wdisabled-optimization \
 		 -Wformat -Wcast-align \
-		 -pedantic -Wunused-variable -Wno-attributes
+		 -pedantic -Wunused-variable -Wno-attributes -Wno-unused-parameter -Wno-unused-function -Wno-unused-label \
+        
 FLAGS+= $(WARNINGS) $(CXXFLAGS) -fopenmp -DNOT_THREADSAFE -DENABLE_COMPUTED_GOTO -mpclmul -pipe
 
 %: src/%.cpp $(OBJ) $(HEADERS)
