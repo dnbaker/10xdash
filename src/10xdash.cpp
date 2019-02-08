@@ -35,8 +35,8 @@ int bam_usage() {
                          "-F\tFail all reads with any bits in argument set. This can be specified multiple times. Default: 0\n"
                          "-o\tOutput path. Default: in.{sb}am.distmat\n"
                          "-p\tNumber of threads to use. Default: 1\n"
-                         "-b\tCheck 'UB' tag. Default: 'CB'\n"
-                         "-r\tCheck 'UR' tag. Default: 'CB'\n"
+                         "-b\tGroup by UB (molecular barcode). Default: 'CB'\n"
+                         "-M\tGroup by both molecule and cellular barcode. Default: 'CB' [Future options: provide sketches for both for downstream analysis.]\n"
                          "-s\tIncrement in log2 size of full experiment sketch in bytes. Default: 0\n"
                          "-R\tMap reserve size. Pre-allocate this much space in the hash table. Default: 1 << 16\n"
                          "-z\tOutput zlib compression level. Set to 0 for uncompressed. Default: 0\n"
@@ -90,15 +90,48 @@ struct CLIArgs {
     int next_rec(bam1_t *b) {return sam_read1(fp, hdr, b);}
 };
 
+namespace barcode_policy {
+struct MoleculeOnly {
+    using key_type = std::uint32_t;
+    key_type operator()(const bam1_t *b) const {
+        uint8_t *data = bam_aux_get(b, "UB");
+        if(unlikely(data == nullptr)) throw std::runtime_error("Missing tag.");
+        return encode_bc(bam_aux2Z(data));
+    }
+};
 
-template<typename SketchType, typename... Args>
+struct CellOnly {
+    using key_type = std::uint32_t;
+    key_type operator()(const bam1_t *b) const {
+        uint8_t *data = bam_aux_get(b, "CB");
+        if(unlikely(data == nullptr)) throw std::runtime_error("Missing tag.");
+        return encode_bc(bam_aux2Z(data));
+    }
+};
+
+struct CellAndMolecule {
+    using key_type = std::uint64_t;
+    key_type operator()(const bam1_t *b) const {
+        uint8_t *data = bam_aux_get(b, "CB");
+        if(unlikely(data == nullptr)) throw std::runtime_error("Missing CB tag.");
+        uint64_t cell_bc = encode_bc(bam_aux2Z(data));
+        cell_bc <<= 32;
+        if(unlikely((data = bam_aux_get(b, "UB")) == nullptr))
+            throw std::runtime_error("Missing UB tag");
+        return cell_bc |= encode_bc(bam_aux2Z(data));
+    }
+};
+} // barcode_policy
+
+
+template<typename SketchType, typename BarcodePolicy, typename... Args>
 int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args &&... sketchargs) {
-    const char *const tag = tags[args.tag];
     suf = SketchFileSuffix<SketchType>::suffix;
     bam1_t *b = bam_init1();
-    ska::flat_hash_map<u32, SketchType> map;
+    ska::flat_hash_map<typename BarcodePolicy::key_type, SketchType> map;
     map.reserve(args.map_reserve_size); // why not?
     const uint64_t kmer_mask = UINT64_C(-1) >> (64 - (args.k * 2));
+    BarcodePolicy bc;
     SketchType *full_set =
         args.skip_full ? nullptr
                        : new SketchType(args.bytesl2_to_arg(
@@ -108,17 +141,14 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     int rc;
     while((rc = args.next_rec(b)) >= 0) {
         if(b->core.flag & (args.fail_flags) || (b->core.flag & args.required_flags) != args.required_flags) continue;
-        uint8_t *data = bam_aux_get(b, tag);
-        if(unlikely(data == nullptr)) RUNTIME_ERROR(std::string("Missing ") + tag + " tag");
-        data = reinterpret_cast<uint8_t *>(bam_aux2Z(data));
-        u32 bcbin = encode_bc(reinterpret_cast<char *>(data));
+        auto bcbin = bc(b);
         auto it = map.find(bcbin);
         if(it == map.end())
             it = map.emplace(bcbin,
                              SketchType(args.bytesl2_to_arg(
                                             args.sketch_size_l2, args.sketch_type),
                                         std::forward<Args>(sketchargs)...)).first;
-        data = bam_get_seq(b);
+        uint8_t *data = bam_get_seq(b);
         int i = 0, len = b->core.l_qseq, nfilled;
         u64 kmer = lut4b[bam_seqi(data, 0)];
         if(kmer == BF)
@@ -223,7 +253,7 @@ int bam_main(int argc, char *argv[]) {
     // TODO: Add count{,min}-sketch filtering for errors in sequencing
     // TODO: Perform richer comparisons based on regions within the genome
     int rc;
-    while((rc = getopt(argc, argv, "W:s:o:k:R:p:S:z:f:F:N:DPKCdwdBbrh?")) >= 0) {
+    while((rc = getopt(argc, argv, "W:s:o:k:R:p:S:z:f:F:N:DPKCdwdBbMh?")) >= 0) {
         switch(rc) {
             case '3': args.sketch_type = HYPERMINHASH32; break;
             case 'B': args.sketch_type = BLOOM_FILTER; break;
@@ -243,7 +273,7 @@ int bam_main(int argc, char *argv[]) {
             case 'k': args.k = std::atoi(optarg); break;
             case 'o': args.omatpath = optarg; break;
             case 'p': args.nthreads = std::atoi(optarg); assert(args.nthreads > 0); break;
-            case 'r': args.tag = UR; break;
+            case 'M': args.tag = BOTH; break;
             case 's': args.full_sketch_size_l2_diff = std::atoi(optarg); break;
             case 'w': args.write_sketches = true; break;
             case 'z': args.compression_level = std::atoi(optarg) % 10; break;
@@ -259,20 +289,29 @@ int bam_main(int argc, char *argv[]) {
     if(!(hdr = sam_hdr_read(fp)))            RUNTIME_ERROR(std::string("Could not parse header from file at ") + argv[optind]);
     dm::DistanceMatrix<float> distances;
     uint32_t *bcs = nullptr;
-    switch(args.sketch_type) {
-        case HLL: core<hll::hll_t>(args, &distances, &bcs); break;
-        case BLOOM_FILTER: core<bf::bf_t>(args, &distances, &bcs); break;
-        case RANGE_MINHASH: core<mh::RangeMinHash<uint64_t>>(args, &distances, &bcs); break;
-        case FULL_KHASH_SET: core<khset64_t>(args, &distances, &bcs); break;
-        case COUNTING_RANGE_MINHASH: core<mh::CountingRangeMinHash<uint64_t>>(args, &distances, &bcs); break;
-        case HYPERMINHASH16: core<mh::HyperMinHash<uint64_t>>(args, &distances, &bcs, 10); break;
-        case HYPERMINHASH32: core<mh::HyperMinHash<uint64_t>>(args, &distances, &bcs, 26); break;
-        case BB_MINHASH:    core<mh::BBitMinHasher<uint64_t>>(args, &distances, &bcs, bbnbits); break;
-        default: {
-            char buf[128];
-            std::sprintf(buf, "Sketch %s not yet supported.\n", args.sketch_type >= sizeof(sketch_names) / sizeof(char *) ? "Not such sketch": sketch_names[args.sketch_type]);
-            RUNTIME_ERROR(buf);
-        }
+
+#define MAIN_SWITCH(policy)\
+    switch(args.sketch_type) {\
+        case HLL: core<hll::hll_t,policy>(args, &distances, &bcs); break;\
+        case BLOOM_FILTER: core<bf::bf_t,policy>(args, &distances, &bcs); break;\
+        case RANGE_MINHASH: core<mh::RangeMinHash<uint64_t>,policy>(args, &distances, &bcs); break;\
+        case FULL_KHASH_SET: core<khset64_t,policy>(args, &distances, &bcs); break;\
+        case COUNTING_RANGE_MINHASH: core<mh::CountingRangeMinHash<uint64_t>,policy>(args, &distances, &bcs); break;\
+        case HYPERMINHASH16: core<mh::HyperMinHash<uint64_t>,policy>(args, &distances, &bcs, 10); break;\
+        case HYPERMINHASH32: core<mh::HyperMinHash<uint64_t>,policy>(args, &distances, &bcs, 26); break;\
+        case BB_MINHASH:    core<mh::BBitMinHasher<uint64_t>,policy>(args, &distances, &bcs, bbnbits); break;\
+        default: {\
+            char buf[128];\
+            std::sprintf(buf, "Sketch %s not yet supported.\n", args.sketch_type >= sizeof(sketch_names) / sizeof(char *) ? "Not such sketch": sketch_names[args.sketch_type]);\
+            RUNTIME_ERROR(buf);\
+        }\
+    }
+    if(args.tag == CB) {
+        MAIN_SWITCH(barcode_policy::CellOnly)
+    } else if(args.tag == UB) {
+        MAIN_SWITCH(barcode_policy::MoleculeOnly)
+    } else {
+        MAIN_SWITCH(barcode_policy::CellAndMolecule)
     }
     if(distances.size()) {
         std::string opath = args.omatpath ? args.omatpath: (std::string(argv[optind]) + ".distmat").data();

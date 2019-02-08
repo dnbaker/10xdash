@@ -16,11 +16,7 @@ static inline u32 encode_bc(const char *s) {
 enum BCType {
     CB = 0,
     UB = 1,
-    UR = 2
-};
-
-static const char *tags[] {
-    "CB", "UB", "UR"
+    BOTH = 2
 };
 
 static const int8_t lut4b [] {
