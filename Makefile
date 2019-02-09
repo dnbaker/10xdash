@@ -11,8 +11,7 @@ LIB=-lz
 all: 10xdash htslib/libhts.a
 htslib/libhts.a:
 	cd htslib && autoheader && autoconf && \
-    sed -i -e 's:enable_libcurl=check:enable_libcurl=no:' ./configure && \
-    ./configure --disable-lzma --disable-bz2 && make libhts.a
+    ./configure --disable-lzma --disable-bz2 --disable-libcurl && make libhts.a
 libhts.a: htslib/libhts.a
 	cp htslib/libhts.a libhts.a
 bonsai/clhash/clhash.o: bonsai/clhash/src/clhash.c
@@ -25,7 +24,7 @@ HEADERS=$(wildcard include/*.h)
 WARNINGS=-Wextra -Wall -pedantic -Wno-ignored-attributes -Wno-char-subscripts \
 		 -Wpointer-arith -Wwrite-strings -Wdisabled-optimization \
 		 -Wformat -Wcast-align \
-		 -pedantic -Wunused-variable -Wno-attributes -Wno-unused-parameter -Wno-unused-function -Wno-unused-label \
+		 -pedantic -Wunused-variable -Wno-attributes -Wno-unused-parameter -Wno-unused-function -Wno-unused-label
         
 FLAGS+= $(WARNINGS) $(CXXFLAGS) -fopenmp -DNOT_THREADSAFE -DENABLE_COMPUTED_GOTO -mpclmul -pipe
 
