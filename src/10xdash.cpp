@@ -172,7 +172,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
     if(full_set) {
         std::string opath = args.fp->fn;
         opath += SketchFileSuffix<SketchType>::suffix;
-        full_writer = std::async(std::launch::async, [&]() {
+        full_writer = std::async(std::launch::async, [opath, full_set]() {
             full_set->write(opath.data());
             delete full_set;
         });
@@ -186,12 +186,15 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
             }));
             while(q.size() >= unsigned(args.nthreads)) {
                 for(auto it = q.begin(); it != q.end();) {
-                    if(it->wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                    if(it->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                        it->get();
                         q.erase(it++);
+                    }
                     else ++it;
                 }
             }
         }
+        for(auto &el: q) if(el.valid()) el.get();
     }
     if(args.write_binary_bc_sketch_pairs.size()) {
         auto names = args.write_binary_bc_sketch_pairs + SketchFileSuffix<SketchType>::suffix;
@@ -204,6 +207,7 @@ int core(CLIArgs &args, dm::DistanceMatrix<float> *distmat, uint32_t **bcs, Args
         }
         gzclose(fp);
     }
+    full_writer.get();
     if(args.skip_distance)
         return EXIT_SUCCESS;
     const size_t map_size = map.size();
